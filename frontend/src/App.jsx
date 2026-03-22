@@ -2,10 +2,13 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import './App.css'
 
 function App() {
+  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002'
+  
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
   const [streamingMode, setStreamingMode] = useState(false)
+  const [musicMode, setMusicMode] = useState(false) // Music/lyrics mode
   const [audioFile, setAudioFile] = useState(null)
   const [audioUrl, setAudioUrl] = useState('')
   const [transcription, setTranscription] = useState('')
@@ -22,6 +25,7 @@ function App() {
   const [showHistory, setShowHistory] = useState(false)
   const [currentTranscriptionId, setCurrentTranscriptionId] = useState(null)
   const [copySuccess, setCopySuccess] = useState(false)
+  const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 })
   
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
@@ -30,11 +34,20 @@ function App() {
   const analyserRef = useRef(null)
   const animationRef = useRef(null)
   const streamRef = useRef(null)
+  const streamingContentRef = useRef(null)
+  const autoScrollRef = useRef(true)
   
   useEffect(() => {
     fetchModels()
     fetchHistory()
   }, [])
+  
+  // Auto-scroll streaming content when new chunks are added
+  useEffect(() => {
+    if (autoScrollRef.current && streamingContentRef.current) {
+      streamingContentRef.current.scrollTop = streamingContentRef.current.scrollHeight
+    }
+  }, [streamChunks])
   
   const fetchHistory = async () => {
     try {
@@ -102,8 +115,7 @@ function App() {
   
   const fetchModels = async () => {
     try {
-      const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3002'
-const response = await fetch(`${API_URL}/api/models`)
+      const response = await fetch(`${API_URL}/api/models`)
       const data = await response.json()
       setModels(data)
       if (data.length > 0) {
@@ -318,6 +330,8 @@ const response = await fetch(`${API_URL}/api/models`)
       formData.append('audio', audioBlob, 'recording.webm')
       formData.append('model', selectedModel)
       formData.append('language', language)
+      formData.append('noise_reduction', 'true')
+      formData.append('trim_silence', 'true')
       
       console.log('Sending to server, model:', selectedModel, 'language:', language)
       
@@ -327,40 +341,39 @@ const response = await fetch(`${API_URL}/api/models`)
       })
       
       console.log('Response status:', response.status)
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || errorData.error || `Transcription failed (${response.status})`)
+      }
+      
       const result = await response.json()
       console.log('Result:', result)
       
-      if (!response.ok) {
-        throw new Error(result.error || 'Transcription failed')
-      }
+      // Clean the transcription text - remove timestamps and metadata
+      let cleanText = (result.text || '')
+        .replace(/\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\]/g, '')
+        .replace(/\[_BEG_\]/g, '')
+        .replace(/\[_TT_\d+\]/g, '')
+        .replace(/\[BLANK_AUDIO\]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
       
-      if (result.success) {
-        console.log('Transcription success:', result.text?.substring(0, 50))
-        // Clean the transcription text - remove timestamps and metadata
-        let cleanText = result.text || ''
-          .replace(/\[\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}\]/g, '')
-          .replace(/\[_BEG_\]/g, '')
-          .replace(/\[_TT_\d+\]/g, '')
-          .replace(/\[BLANK_AUDIO\]/g, '')
-          .replace(/\s+/g, ' ')
-          .trim()
-        setTranscription(cleanText)
-        // Only include segments if they have meaningful text
-        const cleanSegments = (result.segments || []).filter(seg => {
-          const text = seg.text?.trim()
-          return text && text.length > 2 && /[a-zA-Z]/.test(text)
-        })
-        setSegments(cleanSegments)
-        
-        // Save to database
-        saveToDatabase(cleanText, cleanSegments, audioBlob)
-      } else {
-        throw new Error(result.error || 'Transcription failed')
-      }
+      setTranscription(cleanText)
+      
+      // Only include segments if they have meaningful text
+      const cleanSegments = (result.segments || []).filter(seg => {
+        const text = seg.text?.trim()
+        return text && text.length > 2 && /[a-zA-Z]/.test(text)
+      })
+      setSegments(cleanSegments)
+      
+      // Save to database
+      saveToDatabase(cleanText, cleanSegments, audioBlob)
       
     } catch (err) {
       console.error('Transcription error:', err)
-      setError(err.message)
+      setError(err.message || 'Transcription failed. Please try again.')
     } finally {
       setIsProcessing(false)
     }
@@ -389,14 +402,15 @@ const response = await fetch(`${API_URL}/api/models`)
     setError('')
     setStreamChunks([])
     setStreamStatus('Connecting...')
+    setIsStreaming(true)
     
     const eventSource = new EventSource(
       `${API_URL}/api/stream?model=${selectedModel}&language=${language}`
     )
     
     eventSource.onopen = () => {
-      setStreamStatus('Listening...')
-      setIsStreaming(true)
+      // Connection established, wait for status message from server
+      console.log('SSE connection opened')
     }
     
     eventSource.onmessage = (event) => {
@@ -407,18 +421,28 @@ const response = await fetch(`${API_URL}/api/models`)
           case 'transcription':
             // Only add if there's new text (non-empty after deduplication)
             if (data.text && data.text.trim()) {
-              setStreamChunks(prev => [...prev, {
-                text: data.text.trim(),
-                timestamp: new Date(data.timestamp).toLocaleTimeString(),
-                fullText: data.fullText || ''
-              }])
+              setStreamChunks(prev => {
+                const newChunks = [...prev, {
+                  text: data.text.trim(),
+                  timestamp: new Date(data.timestamp).toLocaleTimeString(),
+                  fullText: data.fullText || '',
+                  speaker: data.speakerChanged ? data.speaker : undefined,
+                  speakerChanged: data.speakerChanged || false
+                }]
+                return newChunks
+              })
             }
             break
           case 'status':
             setStreamStatus(data.message)
+            // Update streaming state based on status
+            if (data.message.includes('Listening') || data.message.includes('ready')) {
+              setIsStreaming(true)
+            }
             break
           case 'error':
             setError(`Streaming error: ${data.message}`)
+            setStreamStatus('Error')
             break
           case 'end':
             setStreamStatus('Streaming ended')
@@ -435,6 +459,7 @@ const response = await fetch(`${API_URL}/api/models`)
       console.error('EventSource error:', err)
       setError('Lost connection to streaming server')
       setIsStreaming(false)
+      setStreamStatus('Disconnected')
       eventSource.close()
     }
     
@@ -968,21 +993,30 @@ const response = await fetch(`${API_URL}/api/models`)
         {!streamingMode ? (
           <>
             {/* Recording Card */}
-            <div className="recording-card">
+            <div 
+              className="recording-card"
+              onMouseMove={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect()
+                setMousePos({
+                  x: (e.clientX - rect.left) / rect.width,
+                  y: (e.clientY - rect.top) / rect.height
+                })
+              }}
+            >
               <div className="recording-area">
                 {isRecording ? (
-                  <div className="recording-active">
-                    <button className="mic-button recording" onClick={stopRecording}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <rect x="6" y="6" width="12" height="12" rx="2"/>
-                      </svg>
-                    </button>
+                  <div className="recording-active" onClick={stopRecording} style={{ cursor: 'pointer' }}>
                     <div className="recording-timer">{formatTime(recordingTime)}</div>
                     <div className="audio-visualizer-container">
                       <div className="audio-visualizer">
                         {audioLevels.map((level, i) => {
                           const hue = 260 + (i * 2)
-                          const height = Math.max(3, level * 100)
+                          // Calculate distance from mouse position for interactive effect
+                          const barX = i / audioLevels.length
+                          const distFromMouse = Math.abs(barX - mousePos.x)
+                          const mouseInfluence = Math.max(0, 1 - distFromMouse * 3)
+                          const adjustedLevel = Math.min(1, level + mouseInfluence * 0.3)
+                          const height = Math.max(3, adjustedLevel * 100)
                           return (
                             <div 
                               key={i} 
@@ -990,29 +1024,39 @@ const response = await fetch(`${API_URL}/api/models`)
                               style={{ 
                                 height: `${height}%`,
                                 background: `linear-gradient(180deg, 
-                                  hsl(${hue}, 90%, 65%) 0%, 
-                                  hsl(${hue + 20}, 80%, 55%) 100%)`,
-                                boxShadow: level > 0.3 ? `0 0 ${8 + level * 15}px hsla(${hue}, 90%, 65%, ${level * 0.6})` : 'none'
+                                  hsl(${hue + mouseInfluence * 30}, 90%, 65%) 0%, 
+                                  hsl(${hue + 20 + mouseInfluence * 30}, 80%, 55%) 100%)`,
+                                boxShadow: adjustedLevel > 0.3 ? `0 0 ${8 + adjustedLevel * 15}px hsla(${hue}, 90%, 65%, ${adjustedLevel * 0.6})` : 'none',
+                                opacity: 0.6 + mouseInfluence * 0.4
                               }}
                             />
                           )
                         })}
                       </div>
                       <div className="visualizer-glow" style={{ 
-                        opacity: audioLevels.reduce((a, b) => a + b, 0) / audioLevels.length 
+                        opacity: audioLevels.reduce((a, b) => a + b, 0) / audioLevels.length,
+                        left: `${mousePos.x * 100}%`
                       }}></div>
+                    </div>
+                    <div className="recording-stop-hint">
+                      <span>Click anywhere to stop</span>
                     </div>
                   </div>
                 ) : (
-                  <div className="recording-idle">
-                    <button className="mic-button" onClick={startRecording}>
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                        <line x1="12" y1="19" x2="12" y2="23"/>
-                        <line x1="8" y1="23" x2="16" y2="23"/>
-                      </svg>
-                    </button>
+                  <div className="recording-idle" onClick={startRecording} style={{ cursor: 'pointer' }}>
+                    <div className="mic-ripple-container">
+                      <div className="mic-ripple"></div>
+                      <div className="mic-ripple delay-1"></div>
+                      <div className="mic-ripple delay-2"></div>
+                      <button className="mic-button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                          <line x1="12" y1="19" x2="12" y2="23"/>
+                          <line x1="8" y1="23" x2="16" y2="23"/>
+                        </svg>
+                      </button>
+                    </div>
                     <div className="recording-idle-text">
                       <p className="idle-title">Click to start recording</p>
                       <p className="idle-subtitle">or upload an audio file below</p>
@@ -1243,60 +1287,50 @@ const response = await fetch(`${API_URL}/api/models`)
               minHeight: '150px',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'center',
-              borderBottom: '1px solid var(--border-glass)',
-              background: 'linear-gradient(180deg, rgba(0,0,0,0.3) 0%, transparent 100%)'
+              justifyContent: 'flex-start',
+              borderBottom: '1px solid var(--border-color)',
+              background: 'linear-gradient(180deg, rgba(16, 185, 129, 0.03) 0%, transparent 100%)'
             }}>
               {isStreaming ? (
-                <div style={{ width: '100%', textAlign: 'center' }}>
+                <div style={{ width: '100%', textAlign: 'left' }}>
                   {streamChunks.length > 0 ? (
                     <div className="subtitle-text" style={{
                       fontSize: '1.6rem',
                       lineHeight: '1.8',
-                      color: 'var(--text-primary)'
+                      color: 'var(--text-primary)',
+                      textAlign: 'left'
                     }}>
-                      {/* Show last 2 chunks as subtitle */}
-                      {streamChunks.slice(-2).map((chunk, index) => (
-                        <span 
-                          key={index}
-                          className="subtitle-word"
-                          style={{
-                            display: 'inline',
-                            animation: 'subtitleFadeIn 0.3s ease-out forwards'
-                          }}
-                        >
-                          {chunk.text}{' '}
-                        </span>
-                      ))}
+                      {/* Show words appearing from left to right */}
+                      {streamChunks.slice(-3).map((chunk, chunkIndex) => {
+                        const words = chunk.text.split(' ')
+                        return words.map((word, wordIndex) => (
+                          <span 
+                            key={`${chunkIndex}-${wordIndex}`}
+                            className="subtitle-word"
+                            style={{
+                              display: 'inline-block',
+                              animation: `wordFadeIn 0.2s ease-out forwards`,
+                              animationDelay: `${wordIndex * 0.05}s`,
+                              opacity: 0
+                            }}
+                          >
+                            {word}{' '}
+                          </span>
+                        ))
+                      })}
                       <span className="subtitle-cursor" style={{
                         display: 'inline-block',
-                        width: '4px',
+                        width: '3px',
                         height: '1.4em',
-                        backgroundColor: 'var(--accent-purple)',
+                        backgroundColor: 'var(--eburon-primary)',
                         marginLeft: '4px',
-                        animation: 'cursorBlink 1s ease-in-out infinite',
+                        animation: 'cursorBlink 0.8s ease-in-out infinite',
                         verticalAlign: 'text-bottom',
                         borderRadius: '2px'
                       }}></span>
                     </div>
                   ) : (
                     <div>
-                      <div className="listening-pulse" style={{
-                        width: '60px',
-                        height: '60px',
-                        borderRadius: '50%',
-                        background: 'var(--gradient-primary)',
-                        margin: '0 auto 16px',
-                        animation: 'pulse 2s ease-in-out infinite',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center'
-                      }}>
-                        <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="white" strokeWidth="2">
-                          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                        </svg>
-                      </div>
                       <p style={{ 
                         color: 'var(--text-muted)', 
                         fontSize: '1.1rem'
@@ -1317,10 +1351,19 @@ const response = await fetch(`${API_URL}/api/models`)
               )}
             </div>
             
-            <div className="streaming-content">
+            <div 
+              className="streaming-content"
+              ref={streamingContentRef}
+              onScroll={() => {
+                if (streamingContentRef.current) {
+                  const { scrollTop, scrollHeight, clientHeight } = streamingContentRef.current
+                  autoScrollRef.current = scrollHeight - scrollTop - clientHeight < 50
+                }
+              }}
+            >
               {streamChunks.length === 0 ? (
                 <div className="stream-empty">
-                  <p>{isStreaming ? 'Waiting for transcription...' : 'Click "Start Streaming" to begin'}</p>
+                  <p>{isStreaming ? 'Waiting for transcription...' : 'Start streaming to see results here'}</p>
                 </div>
               ) : (
                 streamChunks.map((chunk, index) => (

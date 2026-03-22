@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # FastAPI Backend with whisper.cpp
+  # FastAPI Backend powered by eburon.ai
   backend:
     build:
       context: .

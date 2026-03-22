@@ -11,6 +11,113 @@ const { sqlite, initializeDatabase, getDatabaseStats, generateId } = require('./
 const app = express();
 const port = 3002;
 
+// Speaker diarization utilities
+class SpeakerDiarizer {
+    constructor() {
+        this.speakers = []; // Speaker voice fingerprints
+        this.speakerColors = ['#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+        this.maxSpeakers = 6;
+    }
+
+    // Extract voice features from audio segment using ffmpeg
+    async extractVoiceFeatures(audioData, sampleRate = 16000) {
+        return new Promise((resolve) => {
+            // Write temp audio file
+            const tempFile = path.join(__dirname, 'uploads', `temp_${Date.now()}.raw`);
+            fs.writeFileSync(tempFile, Buffer.from(audioData));
+            
+            // Extract pitch and energy using ffmpeg
+            const cmd = `ffmpeg -f s16le -ar ${sampleRate} -ac 1 -i "${tempFile}" -af "astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-" -f null - 2>&1 | grep RMS_level | tail -5`;
+            
+            exec(cmd, (error, stdout) => {
+                try {
+                    fs.unlinkSync(tempFile);
+                } catch (e) {}
+                
+                // Parse RMS levels to estimate voice energy
+                const levels = stdout.match(/-?\d+\.?\d*/g);
+                const avgLevel = levels ? levels.reduce((a, b) => a + parseFloat(b), 0) / levels.length : -50;
+                
+                resolve({
+                    energy: avgLevel,
+                    timestamp: Date.now()
+                });
+            });
+        });
+    }
+
+    // Compare two voice fingerprints
+    compareFingerprints(fp1, fp2) {
+        const energyDiff = Math.abs(fp1.energy - fp2.energy);
+        // Lower difference = more similar
+        return energyDiff < 10; // 10dB threshold
+    }
+
+    // Find or create speaker based on voice features
+    identifySpeaker(features) {
+        // If no speakers yet, create first one
+        if (this.speakers.length === 0) {
+            this.speakers.push({
+                id: 0,
+                fingerprints: [features],
+                color: this.speakerColors[0]
+            });
+            return 0;
+        }
+
+        // Compare with existing speakers
+        for (let i = 0; i < this.speakers.length; i++) {
+            const speaker = this.speakers[i];
+            // Check against recent fingerprints
+            const recentFps = speaker.fingerprints.slice(-3);
+            for (const fp of recentFps) {
+                if (this.compareFingerprints(fp, features)) {
+                    // Update fingerprint history
+                    speaker.fingerprints.push(features);
+                    if (speaker.fingerprints.length > 10) {
+                        speaker.fingerprints.shift();
+                    }
+                    return speaker.id;
+                }
+            }
+        }
+
+        // No match found, create new speaker if under limit
+        if (this.speakers.length < this.maxSpeakers) {
+            const newId = this.speakers.length;
+            this.speakers.push({
+                id: newId,
+                fingerprints: [features],
+                color: this.speakerColors[newId]
+            });
+            return newId;
+        }
+
+        // Return most similar speaker
+        let minDiff = Infinity;
+        let closestId = 0;
+        for (const speaker of this.speakers) {
+            const recentFp = speaker.fingerprints[speaker.fingerprints.length - 1];
+            const diff = Math.abs(recentFp.energy - features.energy);
+            if (diff < minDiff) {
+                minDiff = diff;
+                closestId = speaker.id;
+            }
+        }
+        
+        this.speakers[closestId].fingerprints.push(features);
+        return closestId;
+    }
+
+    getSpeakerColor(speakerId) {
+        return this.speakerColors[speakerId % this.speakerColors.length];
+    }
+
+    reset() {
+        this.speakers = [];
+    }
+}
+
 // Initialize database on startup
 initializeDatabase();
 
@@ -79,6 +186,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
 
         const model = req.body.model || 'ggml-base.en.bin';
         const language = req.body.language || 'en';
+        const musicMode = req.body.music === 'true'; // Music/lyrics mode
         const modelPath = path.join(process.env.HOME, 'whisper-models', model);
         
         if (!fs.existsSync(modelPath)) {
@@ -91,9 +199,18 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
         // Convert webm/opus to wav if needed (whisper doesn't support webm)
         if (originalExt === '.webm' || req.file.mimetype.includes('webm')) {
             const wavPath = audioPath.replace(/\.\w+$/, '.wav');
-            const convertCommand = `ffmpeg -i "${audioPath}" -ar 16000 -ac 1 -c:a pcm_s16le "${wavPath}" -y`;
             
-            console.log(`Converting webm to wav: ${convertCommand}`);
+            // Music mode uses different ffmpeg settings for better quality
+            let convertCommand;
+            if (musicMode) {
+                // Keep more audio information for music
+                convertCommand = `ffmpeg -i "${audioPath}" -ar 16000 -ac 1 -c:a pcm_s16le -af "highpass=f=60,lowpass=f=8000" "${wavPath}" -y`;
+            } else {
+                // Standard conversion for speech
+                convertCommand = `ffmpeg -i "${audioPath}" -ar 16000 -ac 1 -c:a pcm_s16le "${wavPath}" -y`;
+            }
+            
+            console.log(`Converting webm to wav (${musicMode ? 'MUSIC' : 'SPEECH'} mode): ${convertCommand}`);
             
             try {
                 await new Promise((resolve, reject) => {
@@ -116,7 +233,7 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
             }
         }
         
-        // Build whisper-cli command with clean output
+        // Build whisper-cli command with mode-specific settings
         let command = `whisper-cli -m "${modelPath}" -f "${audioPath}" -l ${language}`;
         
         // Add output format options (JSON for parsing)
@@ -125,8 +242,14 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
         // Add output file path
         const outputPath = path.join(__dirname, 'uploads', `output-${Date.now()}`);
         command += ` -of "${outputPath}"`;
+        
+        // Add mode-specific parameters
+        if (musicMode) {
+            // Music mode: be more permissive
+            command += ' --no-timestamps';  // Cleaner output for lyrics
+        }
 
-        console.log(`Executing: ${command}`);
+        console.log(`Executing (${musicMode ? 'MUSIC' : 'SPEECH'} mode): ${command}`);
 
         exec(command, (error, stdout, stderr) => {
             console.log('whisper-cli stdout:', stdout?.substring(0, 500));
@@ -269,6 +392,7 @@ app.get('/api/health', (req, res) => {
 app.get('/api/stream', (req, res) => {
     const model = req.query.model || 'ggml-base.en.bin';
     const language = req.query.language || 'en';
+    const musicMode = req.query.music === 'true'; // Music/lyrics mode
     const modelPath = path.join(process.env.HOME, 'whisper-models', model);
     
     if (!fs.existsSync(modelPath)) {
@@ -280,22 +404,42 @@ app.get('/api/stream', (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     
-    // Build whisper-stream command with VAD and clean output
+    // Build whisper-stream command with mode-specific settings
     const command = 'whisper-stream';
+    
+    // Base args
     const args = [
         '-m', modelPath,
         '-l', language,
-        '--step', '2000',     // 2 second steps (faster updates)
-        '--length', '4000',   // 4 second window
-        '--keep', '100',      // keep only 100ms from previous
-        '--vad-thold', '0.7', // Very high VAD threshold (only clear direct speech)
-        '--freq-thold', '300', // Higher frequency cutoff (filter speaker output)
         '--keep-context'      // keep context between chunks
     ];
+    
+    if (musicMode) {
+        // Music/lyrics mode: more sensitive, longer windows
+        args.push('--step', '3000');      // 3 second steps
+        args.push('--length', '8000');    // 8 second window (captures full phrases)
+        args.push('--keep', '200');       // keep 200ms overlap
+        args.push('--vad-thold', '0.2');  // Lower VAD for singing
+        args.push('--freq-thold', '100'); // Keep lower frequencies
+    } else {
+        // Speech mode: optimized for clear speech
+        args.push('--step', '2000');      // 2 second steps
+        args.push('--length', '4000');    // 4 second window
+        args.push('--keep', '100');       // keep 100ms overlap
+        args.push('--vad-thold', '0.7');  // High VAD for clear speech only
+        args.push('--freq-thold', '300'); // Filter low frequencies
+    }
+    
+    console.log(`Starting streaming (${musicMode ? 'MUSIC' : 'SPEECH'} mode): ${command} ${args.join(' ')}`);
 
     console.log(`Starting streaming with: ${command} ${args.join(' ')}`);
     
-    const streamProcess = spawn(command, args);
+    // Send initial status message
+    res.write(`data: ${JSON.stringify({ type: 'status', message: 'Starting whisper-stream...' })}\n\n`);
+    
+    const streamProcess = spawn(command, args, {
+        stdio: ['pipe', 'pipe', 'pipe']
+    });
     
     let buffer = '';
     let fullTranscript = '';
@@ -321,7 +465,7 @@ app.get('/api/stream', (req, res) => {
     };
     
     // Common whisper hallucination patterns to filter out
-    const hallucinationPatterns = [
+    const speechHallucinationPatterns = [
         /^thanks for watching/i,
         /^thank you for watching/i,
         /^please subscribe/i,
@@ -347,15 +491,43 @@ app.get('/api/stream', (req, res) => {
         /^i'd like to/i,
         // Music and meta tags
         /^\[start speaking\]/i,
-        /^\[music\]/i,
-        /^\[applause\]/i,
         /^\[silence\]/i,
         /^\[noise\]/i,
         /^♪/i,
-        /^\[.*\]$/i,  // Any bracketed text
         /^singing/i,
         /^music playing/i,
+        // Common whisper hallucinations
+        /^that chill personal/i,
+        /^post-summer/i,
+        /^thatchillpersonal/i,
+        /^\.\.\.and /i,
+        /^\.\.\.\.\.\./i,  // Multiple dots
+        /^metadata/i,
     ];
+    
+    // Minimal filtering for music mode
+    const musicHallucinationPatterns = [
+        /^thanks for watching/i,
+        /^thank you for watching/i,
+        /^please subscribe/i,
+        /^like and subscribe/i,
+        /^don't forget to/i,
+        /^make sure to/i,
+        /^see you next time/i,
+        /^\[start speaking\]/i,
+        /^\[silence\]/i,
+        /^\[noise\]/i,
+        /^that chill personal/i,
+        /^post-summer search/i,
+        /^and experience/i,
+        /^\.\.\.and /i,
+    ];
+    
+    const hallucinationPatterns = musicMode ? musicHallucinationPatterns : speechHallucinationPatterns;
+    
+    // Initialize speaker diarizer
+    const diarizer = new SpeakerDiarizer();
+    let lastTranscriptTime = 0;
     
     const isLikelyHallucination = (text) => {
         const lowerText = text.toLowerCase().trim();
@@ -384,13 +556,29 @@ app.get('/api/stream', (req, res) => {
             return true;
         }
         
+        // Filter concatenated words without spaces (likely hallucination)
+        if (lowerText.length > 20 && !lowerText.includes(' ') && lowerText.includes('personal')) {
+            return true;
+        }
+        
+        // Filter text with too many consecutive consonants (gibberish)
+        const consonantPattern = /[bcdfghjklmnpqrstvwxyz]{6,}/;
+        if (consonantPattern.test(lowerText.replace(/\s/g, ''))) {
+            return true;
+        }
+        
         // Filter text without vowels (likely gibberish)
         if (!/[aeiou]/.test(lowerText)) {
             return true;
         }
         
         // Filter text that contains only special characters or brackets
-        if (/^[\[\](){}*_~♪♫]+$/.test(lowerText)) {
+        if (/^[\[\](){}*_~♪♫.]+$/i.test(lowerText)) {
+            return true;
+        }
+        
+        // Filter text that starts with dots or brackets
+        if (/^[\.\[\]]+/.test(lowerText)) {
             return true;
         }
         
@@ -412,12 +600,20 @@ app.get('/api/stream', (req, res) => {
         
         lines.forEach(line => {
             if (line.trim()) {
-                // Clean up whisper special tokens
+                // Clean up whisper special tokens and artifacts
                 let cleanText = line.trim()
                     .replace(/\[_BEG_\]/g, '')
                     .replace(/\[_TT_\d+\]/g, '')
                     .replace(/\[BLANK_AUDIO\]/g, '')
                     .replace(/\[_NOP_\]/g, '')
+                    .replace(/\[START_OF_SPEECH\]/g, '')
+                    .replace(/\[END_OF_SPEECH\]/g, '')
+                    .replace(/\[MUSIC\]/gi, '')
+                    .replace(/\[APPLAUSE\]/gi, '')
+                    .replace(/\[LAUGHTER\]/gi, '')
+                    // Remove leading/trailing brackets and dots
+                    .replace(/^[\[\]\.\.\.\s]+/, '')
+                    .replace(/[\[\]]+$/, '')
                     .replace(/\s+/g, ' ')
                     .trim();
                 
@@ -458,14 +654,43 @@ app.get('/api/stream', (req, res) => {
                     ? fullTranscript + ' ' + newText 
                     : newText;
                 
-                // Send only the new text chunk
+                // Speaker diarization - detect changes based on long pauses
+                const now = Date.now();
+                const pauseDuration = now - lastTranscriptTime;
+                let speakerId = diarizer.currentSpeaker || 0;
+                let speakerChanged = false;
+                
+                // Only change speaker on LONG pauses (>4 seconds)
+                if (lastTranscriptTime > 0 && pauseDuration > 4000) {
+                    speakerId = speakerId === 0 ? 1 : 0;
+                    diarizer.currentSpeaker = speakerId;
+                    speakerChanged = true;
+                }
+                
+                // Initialize first speaker
+                if (diarizer.speakers.length === 0) {
+                    diarizer.speakers.push({ id: 0, color: diarizer.getSpeakerColor(0) });
+                    diarizer.speakers.push({ id: 1, color: diarizer.getSpeakerColor(1) });
+                }
+                
+                lastTranscriptTime = now;
+                
+                // Send chunk - only include speaker info if speaker changed
                 const timestamp = new Date().toISOString();
-                res.write(`data: ${JSON.stringify({ 
+                const message = { 
                     type: 'transcription',
                     text: newText.trim(),
                     timestamp,
                     fullText: fullTranscript
-                })}\n\n`);
+                };
+                
+                // Only add speaker info when there's a change
+                if (speakerChanged) {
+                    message.speaker = speakerId;
+                    message.speakerChanged = true;
+                }
+                
+                res.write(`data: ${JSON.stringify(message)}\n\n`);
             }
         });
     });

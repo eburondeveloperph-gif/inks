@@ -1,123 +1,198 @@
 # Eburon AI ASR
 
-Speech-to-Text application powered by whisper.cpp
+<div align="center">
+
+![Eburon AI ASR](https://img.shields.io/badge/Eburon%20AI-ASR-8b5cf6?style=for-the-badge&logo=voice&logoColor=white)
+![eburon.ai](https://img.shields.io/badge/eburon.ai-powered-10b981?style=for-the-badge)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.109.0-009688?style=for-the-badge&logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61dafb?style=for-the-badge&logo=react&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+
+**AI-powered Speech-to-Text application with real-time transcription**
+
+[Documentation](./docs/README.md) • [API Reference](./docs/API.md) • [Deployment Guide](./docs/DEPLOYMENT.md)
+
+</div>
+
+---
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| **Real-time Streaming** | Live transcription with subtitle-style animation |
+| **Multi-language** | Supports 100+ languages via whisper models |
+| **Voice Activity Detection** | Filters silence and background noise |
+| **Echo Cancellation** | Prevents speaker audio feedback |
+| **Local Processing** | All processing on your server (privacy-first) |
+| **Export Options** | Download as TXT, SRT, or JSON |
+| **History** | Save and manage transcription history |
+| **Docker Ready** | One-command deployment |
+
+## Quick Start
+
+```bash
+# Clone and deploy
+git clone https://github.com/eburondeveloperph-gif/inks.git
+cd inks
+./deploy.sh
+```
+
+**That's it!** The app will be running at:
+- Frontend: http://localhost:8080
+- API Docs: http://localhost:3002/docs
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Getting Started](./docs/GETTING-STARTED.md) | Installation and setup guide |
+| [API Reference](./docs/API.md) | Complete API documentation |
+| [Deployment Guide](./docs/DEPLOYMENT.md) | Deploy to Vercel, Railway, Docker |
+| [Configuration](./docs/CONFIGURATION.md) | All configuration options |
+| [Models Guide](./docs/MODELS.md) | Downloading and using models |
+| [Troubleshooting](./docs/TROUBLESHOOTING.md) | Common issues and solutions |
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐
-│   Frontend      │────▶│   Backend       │
-│   (React/Vite)  │     │   (FastAPI)     │
-│   Port 8080     │     │   Port 3002     │
-└─────────────────┘     └─────────────────┘
-                               │
-                               ▼
-                        ┌─────────────────┐
-                        │  whisper.cpp    │
-                        │  (C++ binaries) │
-                        └─────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        CLIENTS                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │   Browser   │  │   Mobile    │  │   Desktop App       │  │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
+│         │                │                    │              │
+└─────────┼────────────────┼────────────────────┼──────────────┘
+          │                │                    │
+          ▼                ▼                    ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    NGINX (Port 8080)                         │
+│                    Reverse Proxy + Static                    │
+└──────────────────────────┬───────────────────────────────────┘
+                           │
+          ┌────────────────┴────────────────┐
+          ▼                                 ▼
+┌─────────────────────┐         ┌─────────────────────────┐
+│      FRONTEND       │         │        BACKEND          │
+│   React + Vite      │         │       FastAPI           │
+│                     │         │       Port 3002         │
+│   • Recording UI    │         │                         │
+│   • Streaming       │────────▶│   • /api/transcribe     │
+│   • History         │   API   │   • /api/stream         │
+│   • Export          │         │   • /api/transcriptions │
+└─────────────────────┘         └────────────┬────────────┘
+                                             │
+                                             ▼
+                                   ┌─────────────────────┐
+                                   │     eburon.ai       │
+                                   │                     │
+                                   │  • whisper-cli      │
+                                   │  • whisper-stream   │
+                                   │                     │
+                                   │  Models:            │
+                                   │  • ink-v1           │
+                                   │  • ink-vfast        │
+                                   │  • + 100 languages  │
+                                   └─────────────────────┘
+                                             │
+                                             ▼
+                                  ┌─────────────────────┐
+                                  │      SQLite         │
+                                  │                     │
+                                  │  • transcriptions   │
+                                  │  • segments         │
+                                  │  • projects         │
+                                  └─────────────────────┘
 ```
 
-## Quick Start with Docker
-
-```bash
-# Clone the repository
-git clone https://github.com/eburondeveloperph-gif/inks.git
-cd inks
-
-# Start all services
-docker-compose up -d
-
-# Access the app
-# Frontend: http://localhost:8080
-# Backend API: http://localhost:3002
-```
-
-## Deployment Options
-
-### Option 1: Docker (Recommended)
-Deploy both frontend and backend together.
-
-```bash
-docker-compose up -d
-```
-
-### Option 2: Vercel (Frontend only) + Railway (Backend)
-
-**Frontend to Vercel:**
-1. Connect GitHub repo to Vercel
-2. Set build command: `cd frontend && npm run build`
-3. Set output directory: `frontend/dist`
-4. Update `frontend/vercel.json` with your backend URL
-
-**Backend to Railway/Render/Fly.io:**
-1. Use the `Dockerfile.backend`
-2. Set environment variables:
-   - `MODEL_DIR=/app/models`
-   - `UPLOAD_DIR=/app/uploads`
-3. Download models on first deploy
-
-### Option 3: Self-hosted VPS
-
-```bash
-# Install Docker and docker-compose
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-
-# Clone and start
-git clone https://github.com/eburondeveloperph-gif/inks.git
-cd inks
-docker-compose up -d
-
-# Setup nginx reverse proxy (optional)
-sudo apt install nginx
-sudo cp nginx.conf /etc/nginx/sites-available/eburon
-sudo ln -s /etc/nginx/sites-available/eburon /etc/nginx/sites-enabled/
-sudo systemctl restart nginx
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MODEL_DIR` | `./models` | Directory for whisper models |
-| `UPLOAD_DIR` | `./uploads` | Directory for temp uploads |
-| `DEFAULT_MODEL` | `ggml-base.en.bin` | Default model to use |
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/health` | Health check |
-| GET | `/api/models` | List available models |
-| POST | `/api/transcribe` | Transcribe audio file |
-| GET | `/api/transcriptions` | List all transcriptions |
-| GET | `/api/transcriptions/:id` | Get specific transcription |
-| DELETE | `/api/transcriptions/:id` | Delete transcription |
-| GET | `/api/search?q=` | Search transcriptions |
-
-## Adding Models
-
-Place model files in the `models/` directory:
-
-```bash
-# Tiny (fastest)
-wget -O models/ggml-tiny.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
-
-# Base (default)
-wget -O models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
-
-# Small (better)
-wget -O models/ggml-small.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
-
-# Medium (best)
-wget -O models/ggml-medium.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin
-```
+---
 
 ## Tech Stack
 
-- **Frontend:** React, Vite, CSS
-- **Backend:** FastAPI (Python)
-- **STT Engine:** whisper.cpp
-- **Database:** SQLite (local) / PostgreSQL (production)
-- **Containerization:** Docker
+| Layer | Technology | Version |
+|-------|------------|---------|
+| **Frontend** | React | 18.x |
+| **Build Tool** | Vite | 5.x |
+| **Backend** | FastAPI | 0.109.x |
+| **Runtime** | Python | 3.11+ |
+| **STT Engine** | eburon.ai | latest |
+| **Database** | SQLite | 3.x |
+| **Web Server** | Nginx | Alpine |
+| **Containers** | Docker | 24.x |
+
+---
+
+## API Overview
+
+```bash
+# Health check
+curl http://localhost:3002/api/health
+
+# List models
+curl http://localhost:3002/api/models
+
+# Transcribe audio
+curl -X POST -F "audio=@audio.mp3" http://localhost:3002/api/transcribe
+
+# List transcriptions
+curl http://localhost:3002/api/transcriptions
+
+# Search transcriptions
+curl http://localhost:3002/api/search?q=hello
+```
+
+Full API docs: http://localhost:3002/docs (Swagger UI)
+
+---
+
+## Models
+
+| Model | Size | Best For |
+|-------|------|----------|
+| `tiny.en` | 75 MB | Real-time, low resources |
+| `base.en` | 142 MB | Balanced (default) |
+| `small.en` | 466 MB | Better accuracy |
+| `medium.en` | 1.5 GB | High accuracy |
+| `large-v3` | 3.1 GB | Maximum accuracy |
+
+---
+
+## Deployment Options
+
+| Platform | Complexity | Cost | Best For |
+|----------|------------|------|----------|
+| **Docker** | Easy | Free | Self-hosted |
+| **Railway** | Easy | $5+/mo | Quick deploy |
+| **Fly.io** | Medium | Free tier | Global |
+| **VPS** | Medium | $5+/mo | Full control |
+| **Vercel** | Easy | Free | Frontend only |
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing`)
+3. Commit changes (`git commit -m 'Add feature'`)
+4. Push to branch (`git push origin feature/amazing`)
+5. Open Pull Request
+
+## License
+
+MIT License - see [LICENSE](./LICENSE)
+
+## Support
+
+- **Docs**: [docs/](./docs/)
+- **Issues**: [GitHub Issues](https://github.com/eburondeveloperph-gif/inks/issues)
+- **API Docs**: http://localhost:3002/docs
+
+---
+
+<div align="center">
+Made with ❤️ by <a href="https://github.com/eburondeveloperph-gif">Eburon Developer</a>
+</div>
