@@ -4,12 +4,42 @@ const { exec, spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
 
 // Import database
 const { sqlite, initializeDatabase, getDatabaseStats, generateId } = require('./db/index.js');
 
 const app = express();
 const port = 3002;
+
+// Swagger/OpenAPI configuration
+const swaggerOptions = {
+    definition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'Eburon AI ASR API',
+            version: '1.0.0',
+            description: 'Speech-to-Text API powered by eburon.ai',
+        },
+        servers: [
+            { url: 'http://localhost:3002', description: 'Local server' },
+        ],
+    },
+    apis: [], // No YAML files, we'll define specs inline
+};
+
+// Swagger docs
+const swaggerDocs = {
+    openapi: '3.0.0',
+    info: {
+        title: 'Eburon AI ASR API',
+        version: '1.0.0',
+        description: 'Speech-to-Text API powered by eburon.ai\n\n## Endpoints\n\n### Health & Models\n- `GET /api/health` - Health check\n- `GET /api/models` - List available models\n\n### Transcription\n- `POST /api/transcribe` - Transcribe audio file\n- `GET /api/transcriptions` - List transcriptions\n- `GET /api/transcriptions/:id` - Get transcription\n\n### Streaming\n- `GET /api/stream` - Real-time streaming (SSE)\n- `POST /api/stream/stop` - Stop streaming',
+    },
+    servers: [
+        { url: 'http://localhost:3002', description: 'Local server' },
+    ],
+};
 
 // Speaker diarization utilities
 class SpeakerDiarizer {
@@ -124,6 +154,10 @@ initializeDatabase();
 app.use(cors());
 app.use(express.json());
 
+// Swagger UI
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+app.get('/api/docs-json', (req, res) => res.json(swaggerDocs));
+
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -160,7 +194,9 @@ const upload = multer({
 // Get available models
 app.get('/api/models', (req, res) => {
     const modelsDir = path.join(process.env.HOME, 'whisper-models');
-    const models = [];
+    const models = [
+        { name: 'ink-zero', path: 'ink-zero', description: 'OpenAI Whisper - Best accuracy' }
+    ];
     
     if (fs.existsSync(modelsDir)) {
         const files = fs.readdirSync(modelsDir);
@@ -168,7 +204,8 @@ app.get('/api/models', (req, res) => {
             if (file.endsWith('.bin')) {
                 models.push({
                     name: file,
-                    path: path.join(modelsDir, file)
+                    path: path.join(modelsDir, file),
+                    description: 'Whisper.cpp - Fast local inference'
                 });
             }
         });
@@ -177,36 +214,123 @@ app.get('/api/models', (req, res) => {
     res.json(models);
 });
 
-// Transcribe audio file
+// Supported languages for crosslingual transcription (whisper.cpp codes)
+const LANGUAGES = {
+    'auto': 'Auto-detect',
+    'en': 'English',
+    'zh': 'Chinese',
+    'de': 'German',
+    'es': 'Spanish',
+    'ru': 'Russian',
+    'ko': 'Korean',
+    'fr': 'French',
+    'ja': 'Japanese',
+    'pt': 'Portuguese',
+    'tr': 'Turkish',
+    'pl': 'Polish',
+    'nl': 'Dutch',
+    'ar': 'Arabic',
+    'cs': 'Czech',
+    'hi': 'Hindi',
+    'ro': 'Romanian',
+    'sv': 'Swedish',
+    'th': 'Thai',
+    'vi': 'Vietnamese',
+    'id': 'Indonesian',
+    'el': 'Greek',
+    'hu': 'Hungarian',
+    'fi': 'Finnish',
+    'he': 'Hebrew',
+    'uk': 'Ukrainian',
+    'ms': 'Malay',
+    'bg': 'Bulgarian',
+    'ca': 'Catalan',
+    'da': 'Danish',
+    'et': 'Estonian',
+    'fa': 'Persian',
+    'hr': 'Croatian',
+    'ka': 'Georgian',
+    'kk': 'Kazakh',
+    'lt': 'Lithuanian',
+    'lv': 'Latvian',
+    'mk': 'Macedonian',
+    'mn': 'Mongolian',
+    'no': 'Norwegian',
+    'sk': 'Slovak',
+    'sl': 'Slovenian',
+    'sq': 'Albanian',
+    'sr': 'Serbian',
+    'uz': 'Uzbek',
+    'az': 'Azerbaijani',
+    'bn': 'Bengali',
+    'gu': 'Gujarati',
+    'kn': 'Kannada',
+    'ml': 'Malayalam',
+    'mr': 'Marathi',
+    'ne': 'Nepali',
+    'pa': 'Punjabi',
+    'si': 'Sinhala',
+    'ta': 'Tamil',
+    'te': 'Telugu',
+    'ur': 'Urdu',
+};
+
+// Language detection patterns (simple heuristic)
+const LANGUAGE_PATTERNS = {
+    'en': /^[a-zA-Z\s\.,!?'"-]+$/,
+    'es': /[áéíóúñ¿¡]/i,
+    'fr': /[àâçéèêëîïôûùüÿœæ]/i,
+    'de': /[äöüß]/i,
+    'zh': /[\u4e00-\u9fff]/,
+    'ja': /[\u3040-\u309f\u30a0-\u30ff]/,
+    'ko': /[\uac00-\ud7af]/,
+    'ar': /[\u0600-\u06ff]/,
+    'hi': /[\u0900-\u097f]/,
+};
+
+function detectLanguage(text) {
+    if (!text || text.length < 3) return 'en';
+    
+    // Check for specific character sets
+    for (const [lang, pattern] of Object.entries(LANGUAGE_PATTERNS)) {
+        if (pattern.test(text)) {
+            return lang;
+        }
+    }
+    
+    return 'en'; // Default to English
+}
+
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
     try {
         if (!req.file) {
+            console.error('No file in request');
             return res.status(400).json({ error: 'No audio file provided' });
         }
 
-        const model = req.body.model || 'ggml-base.en.bin';
-        const language = req.body.language || 'en';
-        const musicMode = req.body.music === 'true'; // Music/lyrics mode
-        const modelPath = path.join(process.env.HOME, 'whisper-models', model);
-        
-        if (!fs.existsSync(modelPath)) {
-            return res.status(400).json({ error: `Model ${model} not found` });
+        console.log('Received file:', req.file.originalname, 'size:', req.file.size, 'model:', req.body.model, 'language:', req.body.language);
+
+        if (req.file.size < 1000) {
+            console.error('File too small:', req.file.size);
+            return res.status(400).json({ error: 'Audio file too small' });
         }
 
+        const model = req.body.model || 'ink-zero';
+        const language = req.body.language || 'auto';
+        const musicMode = req.body.music === 'true';
+        
         let audioPath = req.file.path;
         const originalExt = path.extname(req.file.originalname).toLowerCase();
+        console.log('Processing audio:', audioPath, 'ext:', originalExt);
         
-        // Convert webm/opus to wav if needed (whisper doesn't support webm)
+        // Convert webm/opus to wav if needed
         if (originalExt === '.webm' || req.file.mimetype.includes('webm')) {
             const wavPath = audioPath.replace(/\.\w+$/, '.wav');
             
-            // Music mode uses different ffmpeg settings for better quality
             let convertCommand;
             if (musicMode) {
-                // Keep more audio information for music
                 convertCommand = `ffmpeg -i "${audioPath}" -ar 16000 -ac 1 -c:a pcm_s16le -af "highpass=f=60,lowpass=f=8000" "${wavPath}" -y`;
             } else {
-                // Standard conversion for speech
                 convertCommand = `ffmpeg -i "${audioPath}" -ar 16000 -ac 1 -c:a pcm_s16le "${wavPath}" -y`;
             }
             
@@ -233,23 +357,24 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
             }
         }
         
-        // Build whisper-cli command with mode-specific settings
-        let command = `whisper-cli -m "${modelPath}" -f "${audioPath}" -l ${language}`;
-        
-        // Add output format options (JSON for parsing)
-        command += ' -oj';
-        
-        // Add output file path
+        // Build transcription command based on model
         const outputPath = path.join(__dirname, 'uploads', `output-${Date.now()}`);
-        command += ` -of "${outputPath}"`;
+        const whisperLang = language === 'auto' ? 'en' : language;
+        let command;
         
-        // Add mode-specific parameters
-        if (musicMode) {
-            // Music mode: be more permissive
-            command += ' --no-timestamps';  // Cleaner output for lyrics
+        if (model === 'ink-zero') {
+            // Use OpenAI Whisper
+            command = `whisper "${audioPath}" --model base --language ${whisperLang} --output_format json --output_dir "${outputPath}"`;
+        } else {
+            // Use whisper.cpp
+            const modelPath = path.join(process.env.HOME, 'whisper-models', model);
+            if (!fs.existsSync(modelPath)) {
+                return res.status(400).json({ error: `Model ${model} not found` });
+            }
+            command = `whisper-cli -m "${modelPath}" -f "${audioPath}" -l ${whisperLang} -oj -of "${outputPath}"`;
         }
-
-        console.log(`Executing (${musicMode ? 'MUSIC' : 'SPEECH'} mode): ${command}`);
+        
+        console.log(`Executing (${model}): ${command}`);
 
         exec(command, (error, stdout, stderr) => {
             console.log('whisper-cli stdout:', stdout?.substring(0, 500));
@@ -275,10 +400,11 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
                 });
             }
 
-            // Check for output files
-            const jsonPath = outputPath + '.json';
-            const txtPath = outputPath + '.txt';
-            const srtPath = outputPath + '.srt';
+            // Check for output files (OpenAI Whisper outputs to {output_dir}/{filename}.json)
+            const audioFileName = path.basename(audioPath, path.extname(audioPath));
+            const jsonPath = path.join(outputPath, audioFileName + '.json');
+            const txtPath = path.join(outputPath, audioFileName + '.txt');
+            const srtPath = path.join(outputPath, audioFileName + '.srt');
 
             let result = {
                 success: true,
@@ -306,31 +432,50 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
                             .join(' ')
                             .trim();
                         
-                        // Extract segments with proper timestamps
-                        segmentsArray = jsonData.transcription.map((seg, idx) => ({
-                            start: seg.offsets?.from ? seg.offsets.from / 1000 : (seg.t0 ? seg.t0 / 1000 : idx * 5),
-                            end: seg.offsets?.to ? seg.offsets.to / 1000 : (seg.t1 ? seg.t1 / 1000 : (idx + 1) * 5),
-                            text: (seg.text || '').trim(),
-                            confidence: seg.confidence || null
-                        }));
+                        // Extract segments with language detection
+                        segmentsArray = jsonData.transcription.map((seg, idx) => {
+                            const text = (seg.text || '').trim();
+                            return {
+                                start: seg.offsets?.from ? seg.offsets.from / 1000 : (seg.t0 ? seg.t0 / 1000 : idx * 5),
+                                end: seg.offsets?.to ? seg.offsets.to / 1000 : (seg.t1 ? seg.t1 / 1000 : (idx + 1) * 5),
+                                text: text,
+                                language: detectLanguage(text),
+                                languageName: LANGUAGES[detectLanguage(text)] || 'Unknown',
+                                confidence: seg.confidence || null
+                            };
+                        });
                     } else if (jsonData.text) {
                         transcriptionText = jsonData.text;
-                        segmentsArray = (jsonData.segments || []).map((seg, idx) => ({
-                            start: seg.start || seg.t0 ? (seg.start || seg.t0 / 1000) : idx * 5,
-                            end: seg.end || seg.t1 ? (seg.end || seg.t1 / 1000) : (idx + 1) * 5,
-                            text: (seg.text || '').trim(),
-                            confidence: seg.confidence || null
-                        }));
+                        segmentsArray = (jsonData.segments || []).map((seg, idx) => {
+                            const text = (seg.text || '').trim();
+                            return {
+                                start: seg.start || seg.t0 ? (seg.start || seg.t0 / 1000) : idx * 5,
+                                end: seg.end || seg.t1 ? (seg.end || seg.t1 / 1000) : (idx + 1) * 5,
+                                text: text,
+                                language: detectLanguage(text),
+                                languageName: LANGUAGES[detectLanguage(text)] || 'Unknown',
+                                confidence: seg.confidence || null
+                            };
+                        });
                     } else if (jsonData.result) {
                         transcriptionText = jsonData.result || '';
                     }
                     
+                    // Count detected languages
+                    const languageCounts = {};
+                    segmentsArray.forEach(seg => {
+                        const lang = seg.language;
+                        languageCounts[lang] = (languageCounts[lang] || 0) + 1;
+                    });
+                    
                     console.log('Transcription text:', transcriptionText?.substring(0, 100));
-                    console.log('Segments with timestamps:', segmentsArray.slice(0, 3));
+                    console.log('Detected languages:', languageCounts);
                     
                     result.json = jsonData;
                     result.text = transcriptionText;
                     result.segments = segmentsArray;
+                    result.detectedLanguages = languageCounts;
+                    result.primaryLanguage = Object.entries(languageCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'en';
                     result.success = true;
                     
                     // Clean up JSON file
@@ -390,13 +535,24 @@ app.get('/api/health', (req, res) => {
 
 // Streaming endpoint using Server-Sent Events (SSE)
 app.get('/api/stream', (req, res) => {
-    const model = req.query.model || 'ggml-base.en.bin';
-    const language = req.query.language || 'en';
-    const musicMode = req.query.music === 'true'; // Music/lyrics mode
-    const modelPath = path.join(process.env.HOME, 'whisper-models', model);
+    let model = req.query.model || 'ink-zero'; // Use ink-zero model by default
+    const language = req.query.language || 'en'; // Use English by default
+    const musicMode = req.query.music === 'true';
     
+    // ink-zero uses OpenAI Whisper, others use whisper.cpp
+    if (model === 'ink-zero') {
+        // For streaming with ink-zero, we'll still use whisper-stream (whisper.cpp)
+        // since OpenAI Whisper doesn't support streaming
+        const defaultModel = path.join(process.env.HOME, 'whisper-models', 'ggml-base.en.bin');
+        if (!fs.existsSync(defaultModel)) {
+            return res.status(400).json({ error: 'Default whisper.cpp model not found' });
+        }
+        model = 'ggml-base.en.bin';
+    }
+    
+    const modelPath = path.join(process.env.HOME, 'whisper-models', model);
     if (!fs.existsSync(modelPath)) {
-        return res.status(400).json({ error: `Model ${model} not found` });
+        return res.status(400).json({ error: `Model ${model} not found at ${modelPath}` });
     }
 
     // Set up SSE headers
@@ -410,24 +566,28 @@ app.get('/api/stream', (req, res) => {
     // Base args
     const args = [
         '-m', modelPath,
-        '-l', language,
-        '--keep-context'      // keep context between chunks
+        '--keep-context'
     ];
     
+    // Use auto language detection if specified
+    if (language !== 'auto') {
+        args.push('-l', language);
+    }
+    
     if (musicMode) {
-        // Music/lyrics mode: more sensitive, longer windows
-        args.push('--step', '3000');      // 3 second steps
-        args.push('--length', '8000');    // 8 second window (captures full phrases)
-        args.push('--keep', '200');       // keep 200ms overlap
-        args.push('--vad-thold', '0.2');  // Lower VAD for singing
-        args.push('--freq-thold', '100'); // Keep lower frequencies
+        // Music/lyrics mode
+        args.push('--step', '3000');
+        args.push('--length', '8000');
+        args.push('--keep', '200');
+        args.push('--vad-thold', '0.2');
+        args.push('--freq-thold', '100');
     } else {
-        // Speech mode: optimized for clear speech
-        args.push('--step', '2000');      // 2 second steps
-        args.push('--length', '4000');    // 4 second window
-        args.push('--keep', '100');       // keep 100ms overlap
-        args.push('--vad-thold', '0.7');  // High VAD for clear speech only
-        args.push('--freq-thold', '300'); // Filter low frequencies
+        // Speech mode
+        args.push('--step', '2000');
+        args.push('--length', '4000');
+        args.push('--keep', '100');
+        args.push('--vad-thold', '0.7');
+        args.push('--freq-thold', '300');
     }
     
     console.log(`Starting streaming (${musicMode ? 'MUSIC' : 'SPEECH'} mode): ${command} ${args.join(' ')}`);
@@ -501,8 +661,12 @@ app.get('/api/stream', (req, res) => {
         /^post-summer/i,
         /^thatchillpersonal/i,
         /^\.\.\.and /i,
-        /^\.\.\.\.\.\./i,  // Multiple dots
+        /^\.\.\.\.\.\./i,
         /^metadata/i,
+        // Foreign language markers from whisper
+        /^\(speaking in foreign language\)/i,
+        /^\[speaking in foreign language\]/i,
+        /^speaking in foreign language/i,
     ];
     
     // Minimal filtering for music mode
@@ -521,6 +685,8 @@ app.get('/api/stream', (req, res) => {
         /^post-summer search/i,
         /^and experience/i,
         /^\.\.\.and /i,
+        /^\(speaking in foreign language\)/i,
+        /^\[speaking in foreign language\]/i,
     ];
     
     const hallucinationPatterns = musicMode ? musicHallucinationPatterns : speechHallucinationPatterns;
@@ -654,43 +820,19 @@ app.get('/api/stream', (req, res) => {
                     ? fullTranscript + ' ' + newText 
                     : newText;
                 
-                // Speaker diarization - detect changes based on long pauses
-                const now = Date.now();
-                const pauseDuration = now - lastTranscriptTime;
-                let speakerId = diarizer.currentSpeaker || 0;
-                let speakerChanged = false;
+                // Detect language for this chunk
+                const detectedLang = detectLanguage(newText.trim());
                 
-                // Only change speaker on LONG pauses (>4 seconds)
-                if (lastTranscriptTime > 0 && pauseDuration > 4000) {
-                    speakerId = speakerId === 0 ? 1 : 0;
-                    diarizer.currentSpeaker = speakerId;
-                    speakerChanged = true;
-                }
-                
-                // Initialize first speaker
-                if (diarizer.speakers.length === 0) {
-                    diarizer.speakers.push({ id: 0, color: diarizer.getSpeakerColor(0) });
-                    diarizer.speakers.push({ id: 1, color: diarizer.getSpeakerColor(1) });
-                }
-                
-                lastTranscriptTime = now;
-                
-                // Send chunk - only include speaker info if speaker changed
+                // Send transcription chunk with language info
                 const timestamp = new Date().toISOString();
-                const message = { 
+                res.write(`data: ${JSON.stringify({ 
                     type: 'transcription',
                     text: newText.trim(),
                     timestamp,
-                    fullText: fullTranscript
-                };
-                
-                // Only add speaker info when there's a change
-                if (speakerChanged) {
-                    message.speaker = speakerId;
-                    message.speakerChanged = true;
-                }
-                
-                res.write(`data: ${JSON.stringify(message)}\n\n`);
+                    fullText: fullTranscript,
+                    language: detectedLang,
+                    languageName: LANGUAGES[detectedLang] || 'Unknown'
+                })}\n\n`);
             }
         });
     });

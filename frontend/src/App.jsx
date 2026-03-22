@@ -10,15 +10,17 @@ function App() {
   const [streamingMode, setStreamingMode] = useState(false)
   const [musicMode, setMusicMode] = useState(false) // Music/lyrics mode
   const [audioFile, setAudioFile] = useState(null)
+  const [recordedAudioUrl, setRecordedAudioUrl] = useState('')
   const [audioUrl, setAudioUrl] = useState('')
   const [transcription, setTranscription] = useState('')
   const [segments, setSegments] = useState([])
   const [streamChunks, setStreamChunks] = useState([])
-  const [models, setModels] = useState([])
-  const [selectedModel, setSelectedModel] = useState('ggml-base.en.bin')
-  const [language, setLanguage] = useState('en')
+  const [models, setModels] = useState([{ name: 'ink-zero', path: 'ink-zero' }])
+  const [selectedModel, setSelectedModel] = useState('ink-zero')
+  const [language, setLanguage] = useState('auto')
   const [error, setError] = useState('')
   const [recordingTime, setRecordingTime] = useState(0)
+  const [isPaused, setIsPaused] = useState(false)
   const [streamStatus, setStreamStatus] = useState('')
   const [audioLevels, setAudioLevels] = useState(new Array(32).fill(0))
   const [transcriptionHistory, setTranscriptionHistory] = useState([])
@@ -252,11 +254,33 @@ function App() {
     }
   }
   
+  const pauseRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+      mediaRecorderRef.current.pause()
+      setIsPaused(true)
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }
+
+  const resumeRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'paused') {
+      mediaRecorderRef.current.resume()
+      setIsPaused(false)
+      timerRef.current = setInterval(() => {
+        setRecordingTime(prev => prev + 1)
+      }, 1000)
+    }
+  }
+
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording && mediaRecorderRef.current.state === 'recording') {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       // Stop recording
       mediaRecorderRef.current.stop()
       setIsRecording(false)
+      setIsPaused(false)
       
       if (timerRef.current) {
         clearInterval(timerRef.current)
@@ -275,9 +299,10 @@ function App() {
           const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
           
           if (audioBlob && audioBlob.size > 0) {
+            const audioUrl = URL.createObjectURL(audioBlob)
+            setRecordedAudioUrl(audioUrl) // Save for playback
             setAudioFile(audioBlob)
-            const url = URL.createObjectURL(audioBlob)
-            setAudioUrl(url)
+            setAudioUrl(audioUrl)
             // Auto transcribe
             transcribeAudioFile(audioBlob)
           }
@@ -326,6 +351,11 @@ function App() {
     setSegments([])
     
     try {
+      // Validate audio blob
+      if (!audioBlob || audioBlob.size === 0) {
+        throw new Error('No audio recorded')
+      }
+      
       const formData = new FormData()
       formData.append('audio', audioBlob, 'recording.webm')
       formData.append('model', selectedModel)
@@ -333,7 +363,7 @@ function App() {
       formData.append('noise_reduction', 'true')
       formData.append('trim_silence', 'true')
       
-      console.log('Sending to server, model:', selectedModel, 'language:', language)
+      console.log('Sending to server, model:', selectedModel, 'language:', language, 'size:', audioBlob.size)
       
       const response = await fetch(`${API_URL}/api/transcribe`, {
         method: 'POST',
@@ -343,8 +373,9 @@ function App() {
       console.log('Response status:', response.status)
       
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.detail || errorData.error || `Transcription failed (${response.status})`)
+        const errorText = await response.text()
+        console.error('Response error:', errorText)
+        throw new Error(`Transcription failed (${response.status}): ${errorText}`)
       }
       
       const result = await response.json()
@@ -367,6 +398,10 @@ function App() {
         return text && text.length > 2 && /[a-zA-Z]/.test(text)
       })
       setSegments(cleanSegments)
+      
+      // Store audio for playback
+      setRecordedAudioUrl(audioUrl || URL.createObjectURL(audioBlob))
+      setAudioFile(audioBlob)
       
       // Save to database
       saveToDatabase(cleanText, cleanSegments, audioBlob)
@@ -421,16 +456,13 @@ function App() {
           case 'transcription':
             // Only add if there's new text (non-empty after deduplication)
             if (data.text && data.text.trim()) {
-              setStreamChunks(prev => {
-                const newChunks = [...prev, {
-                  text: data.text.trim(),
-                  timestamp: new Date(data.timestamp).toLocaleTimeString(),
-                  fullText: data.fullText || '',
-                  speaker: data.speakerChanged ? data.speaker : undefined,
-                  speakerChanged: data.speakerChanged || false
-                }]
-                return newChunks
-              })
+              setStreamChunks(prev => [...prev, {
+                text: data.text.trim(),
+                timestamp: new Date(data.timestamp).toLocaleTimeString(),
+                fullText: data.fullText || '',
+                language: data.language,
+                languageName: data.languageName
+              }])
             }
             break
           case 'status':
@@ -507,241 +539,61 @@ function App() {
   const languages = [
     { code: 'auto', name: 'Auto Detect' },
     { code: 'en', name: 'English' },
-    { code: 'nl', name: 'Dutch' },
-    { code: 'af', name: 'Afrikaans' },
-    { code: 'sq', name: 'Albanian' },
-    { code: 'am', name: 'Amharic' },
-    { code: 'ar', name: 'Arabic' },
-    { code: 'hy', name: 'Armenian' },
-    { code: 'az', name: 'Azerbaijani' },
-    { code: 'eu', name: 'Basque' },
-    { code: 'be', name: 'Belarusian' },
-    { code: 'bn', name: 'Bengali' },
-    { code: 'bs', name: 'Bosnian' },
-    { code: 'bg', name: 'Bulgarian' },
-    { code: 'my', name: 'Burmese' },
-    { code: 'ca', name: 'Catalan' },
-    { code: 'ceb', name: 'Cebuano' },
-    { code: 'ny', name: 'Chichewa' },
-    { code: 'zh', name: 'Chinese (Simplified)' },
-    { code: 'zh-tw', name: 'Chinese (Traditional)' },
-    { code: 'co', name: 'Corsican' },
-    { code: 'hr', name: 'Croatian' },
-    { code: 'cs', name: 'Czech' },
-    { code: 'da', name: 'Danish' },
-    { code: 'dv', name: 'Dhivehi' },
-    { code: 'dz', name: 'Dzongkha' },
-    { code: 'eo', name: 'Esperanto' },
-    { code: 'et', name: 'Estonian' },
-    { code: 'tl', name: 'Filipino' },
-    { code: 'fi', name: 'Finnish' },
-    { code: 'fr', name: 'French' },
-    { code: 'fr-ca', name: 'French (Canada)' },
-    { code: 'fy', name: 'Frisian' },
-    { code: 'gl', name: 'Galician' },
-    { code: 'ka', name: 'Georgian' },
+    { code: 'zh', name: 'Chinese' },
     { code: 'de', name: 'German' },
-    { code: 'el', name: 'Greek' },
-    { code: 'gu', name: 'Gujarati' },
-    { code: 'ht', name: 'Haitian Creole' },
-    { code: 'ha', name: 'Hausa' },
-    { code: 'haw', name: 'Hawaiian' },
-    { code: 'he', name: 'Hebrew' },
-    { code: 'hi', name: 'Hindi' },
-    { code: 'hmn', name: 'Hmong' },
-    { code: 'hu', name: 'Hungarian' },
-    { code: 'is', name: 'Icelandic' },
-    { code: 'ig', name: 'Igbo' },
-    { code: 'id', name: 'Indonesian' },
-    { code: 'ga', name: 'Irish' },
-    { code: 'it', name: 'Italian' },
-    { code: 'ja', name: 'Japanese' },
-    { code: 'jw', name: 'Javanese' },
-    { code: 'kn', name: 'Kannada' },
-    { code: 'kk', name: 'Kazakh' },
-    { code: 'km', name: 'Khmer' },
-    { code: 'rw', name: 'Kinyarwanda' },
-    { code: 'ko', name: 'Korean' },
-    { code: 'ku', name: 'Kurdish' },
-    { code: 'ky', name: 'Kyrgyz' },
-    { code: 'lo', name: 'Lao' },
-    { code: 'la', name: 'Latin' },
-    { code: 'lv', name: 'Latvian' },
-    { code: 'lt', name: 'Lithuanian' },
-    { code: 'lb', name: 'Luxembourgish' },
-    { code: 'mk', name: 'Macedonian' },
-    { code: 'mg', name: 'Malagasy' },
-    { code: 'ms', name: 'Malay' },
-    { code: 'ml', name: 'Malayalam' },
-    { code: 'mt', name: 'Maltese' },
-    { code: 'mi', name: 'Maori' },
-    { code: 'mr', name: 'Marathi' },
-    { code: 'mn', name: 'Mongolian' },
-    { code: 'ne', name: 'Nepali' },
-    { code: 'no', name: 'Norwegian' },
-    { code: 'or', name: 'Odia' },
-    { code: 'ps', name: 'Pashto' },
-    { code: 'fa', name: 'Persian' },
-    { code: 'pl', name: 'Polish' },
-    { code: 'pt', name: 'Portuguese' },
-    { code: 'pt-br', name: 'Portuguese (Brazil)' },
-    { code: 'pa', name: 'Punjabi' },
-    { code: 'ro', name: 'Romanian' },
+    { code: 'es', name: 'Spanish' },
     { code: 'ru', name: 'Russian' },
-    { code: 'sm', name: 'Samoan' },
-    { code: 'gd', name: 'Scots Gaelic' },
-    { code: 'sr', name: 'Serbian' },
-    { code: 'sn', name: 'Shona' },
-    { code: 'sd', name: 'Sindhi' },
-    { code: 'si', name: 'Sinhala' },
+    { code: 'ko', name: 'Korean' },
+    { code: 'fr', name: 'French' },
+    { code: 'ja', name: 'Japanese' },
+    { code: 'pt', name: 'Portuguese' },
+    { code: 'tr', name: 'Turkish' },
+    { code: 'pl', name: 'Polish' },
+    { code: 'nl', name: 'Dutch' },
+    { code: 'ar', name: 'Arabic' },
+    { code: 'cs', name: 'Czech' },
+    { code: 'hi', name: 'Hindi' },
+    { code: 'ro', name: 'Romanian' },
+    { code: 'sv', name: 'Swedish' },
+    { code: 'th', name: 'Thai' },
+    { code: 'vi', name: 'Vietnamese' },
+    { code: 'id', name: 'Indonesian' },
+    { code: 'el', name: 'Greek' },
+    { code: 'hu', name: 'Hungarian' },
+    { code: 'fi', name: 'Finnish' },
+    { code: 'he', name: 'Hebrew' },
+    { code: 'uk', name: 'Ukrainian' },
+    { code: 'ms', name: 'Malay' },
+    { code: 'bg', name: 'Bulgarian' },
+    { code: 'ca', name: 'Catalan' },
+    { code: 'da', name: 'Danish' },
+    { code: 'et', name: 'Estonian' },
+    { code: 'fa', name: 'Persian' },
+    { code: 'hr', name: 'Croatian' },
+    { code: 'ka', name: 'Georgian' },
+    { code: 'kk', name: 'Kazakh' },
+    { code: 'lt', name: 'Lithuanian' },
+    { code: 'lv', name: 'Latvian' },
+    { code: 'mk', name: 'Macedonian' },
+    { code: 'mn', name: 'Mongolian' },
+    { code: 'no', name: 'Norwegian' },
     { code: 'sk', name: 'Slovak' },
     { code: 'sl', name: 'Slovenian' },
-    { code: 'so', name: 'Somali' },
-    { code: 'es', name: 'Spanish' },
-    { code: 'su', name: 'Sundanese' },
-    { code: 'sw', name: 'Swahili' },
-    { code: 'sv', name: 'Swedish' },
-    { code: 'tg', name: 'Tajik' },
-    { code: 'ta', name: 'Tamil' },
-    { code: 'tt', name: 'Tatar' },
-    { code: 'te', name: 'Telugu' },
-    { code: 'th', name: 'Thai' },
-    { code: 'bo', name: 'Tibetan' },
-    { code: 'tr', name: 'Turkish' },
-    { code: 'tk', name: 'Turkmen' },
-    { code: 'uk', name: 'Ukrainian' },
-    { code: 'ur', name: 'Urdu' },
-    { code: 'ug', name: 'Uyghur' },
+    { code: 'sq', name: 'Albanian' },
+    { code: 'sr', name: 'Serbian' },
     { code: 'uz', name: 'Uzbek' },
-    { code: 'vi', name: 'Vietnamese' },
-    { code: 'cy', name: 'Welsh' },
-    { code: 'xh', name: 'Xhosa' },
-    { code: 'yi', name: 'Yiddish' },
-    { code: 'yo', name: 'Yoruba' },
-    { code: 'zu', name: 'Zulu' },
-    { code: 'ace', name: 'Acehnese' },
-    { code: 'ach', name: 'Acholi' },
-    { code: 'aa', name: 'Afar' },
-    { code: 'ak', name: 'Akan' },
-    { code: 'an', name: 'Aragonese' },
-    { code: 'av', name: 'Avar' },
-    { code: 'ay', name: 'Aymara' },
-    { code: 'bm', name: 'Bambara' },
-    { code: 'ba', name: 'Bashkir' },
-    { code: 'bem', name: 'Bemba' },
-    { code: 'bho', name: 'Bhojpuri' },
-    { code: 'bi', name: 'Bislama' },
-    { code: 'br', name: 'Breton' },
-    { code: 'bxr', name: 'Buryat' },
-    { code: 'yue', name: 'Cantonese' },
-    { code: 'cv', name: 'Chuvash' },
-    { code: 'crh', name: 'Crimean Tatar' },
-    { code: 'din', name: 'Dinka' },
-    { code: 'doi', name: 'Dogri' },
-    { code: 'dyu', name: 'Dyula' },
-    { code: 'fo', name: 'Faroese' },
-    { code: 'fj', name: 'Fijian' },
-    { code: 'fon', name: 'Fon' },
-    { code: 'fur', name: 'Friulian' },
-    { code: 'ff', name: 'Fulah' },
-    { code: 'gaa', name: 'Ga' },
-    { code: 'gn', name: 'Guarani' },
-    { code: 'hil', name: 'Hiligaynon' },
-    { code: 'iba', name: 'Iban' },
-    { code: 'ilo', name: 'Ilocano' },
-    { code: 'kab', name: 'Kabyle' },
-    { code: 'kal', name: 'Kalaallisut' },
-    { code: 'kam', name: 'Kamba' },
-    { code: 'kha', name: 'Khasi' },
-    { code: 'ki', name: 'Kikuyu' },
-    { code: 'kmb', name: 'Kimbundu' },
-    { code: 'kok', name: 'Konkani' },
-    { code: 'kri', name: 'Krio' },
-    { code: 'lad', name: 'Ladino' },
-    { code: 'lag', name: 'Langi' },
-    { code: 'ln', name: 'Lingala' },
-    { code: 'loz', name: 'Lozi' },
-    { code: 'lua', name: 'Luba-Lulua' },
-    { code: 'lun', name: 'Lunda' },
-    { code: 'luo', name: 'Luo' },
-    { code: 'lus', name: 'Mizo' },
-    { code: 'mad', name: 'Madurese' },
-    { code: 'mag', name: 'Magahi' },
-    { code: 'mai', name: 'Maithili' },
-    { code: 'mak', name: 'Makassar' },
-    { code: 'mas', name: 'Masai' },
-    { code: 'mfe', name: 'Morisyen' },
-    { code: 'mer', name: 'Meru' },
-    { code: 'mgh', name: 'Makhuwa-Meetto' },
-    { code: 'moh', name: 'Mohawk' },
-    { code: 'mos', name: 'Mossi' },
-    { code: 'naq', name: 'Nama' },
-    { code: 'nap', name: 'Neapolitan' },
-    { code: 'nde', name: 'Ndebele (North)' },
-    { code: 'nds', name: 'Low German' },
-    { code: 'new', name: 'Nepal Bhasa' },
-    { code: 'nia', name: 'Nias' },
-    { code: 'niu', name: 'Niuean' },
-    { code: 'nog', name: 'Nogai' },
-    { code: 'nso', name: 'Northern Sotho' },
-    { code: 'nus', name: 'Nuer' },
-    { code: 'oc', name: 'Occitan' },
-    { code: 'osa', name: 'Osage' },
-    { code: 'pag', name: 'Pangasinan' },
-    { code: 'pap', name: 'Papiamento' },
-    { code: 'qu', name: 'Quechua' },
-    { code: 'raj', name: 'Rajasthani' },
-    { code: 'rap', name: 'Rapanui' },
-    { code: 'rm', name: 'Romansh' },
-    { code: 'rn', name: 'Rundi' },
-    { code: 'rup', name: 'Aromanian' },
-    { code: 'sah', name: 'Yakut' },
-    { code: 'saq', name: 'Samburu' },
-    { code: 'sat', name: 'Santali' },
-    { code: 'scn', name: 'Sicilian' },
-    { code: 'sco', name: 'Scots' },
-    { code: 'sel', name: 'Selkup' },
-    { code: 'sg', name: 'Sango' },
-    { code: 'shn', name: 'Shan' },
-    { code: 'sid', name: 'Sidamo' },
-    { code: 'sma', name: 'Sami (Southern)' },
-    { code: 'smn', name: 'Sami (Inari)' },
-    { code: 'sms', name: 'Sami (Skolt)' },
-    { code: 'snk', name: 'Soninke' },
-    { code: 'srn', name: 'Sranan Tongo' },
-    { code: 'ss', name: 'Swati' },
-    { code: 'st', name: 'Sesotho' },
-    { code: 'suk', name: 'Sukuma' },
-    { code: 'sus', name: 'Susu' },
-    { code: 'syl', name: 'Sylheti' },
-    { code: 'syr', name: 'Syriac' },
-    { code: 'ty', name: 'Tahitian' },
-    { code: 'tem', name: 'Temne' },
-    { code: 'tet', name: 'Tetum' },
-    { code: 'tig', name: 'Tigre' },
-    { code: 'tiv', name: 'Tiv' },
-    { code: 'tkl', name: 'Tokelau' },
-    { code: 'tli', name: 'Tlingit' },
-    { code: 'tmh', name: 'Tamashek' },
-    { code: 'tog', name: 'Tonga (Nyasa)' },
-    { code: 'tpi', name: 'Tok Pisin' },
-    { code: 'ts', name: 'Tsonga' },
-    { code: 'tum', name: 'Tumbuka' },
-    { code: 'tvl', name: 'Tuvalu' },
-    { code: 'tw', name: 'Twi' },
-    { code: 'tyv', name: 'Tuvinian' },
-    { code: 'udm', name: 'Udmurt' },
-    { code: 've', name: 'Venda' },
-    { code: 'vec', name: 'Venetian' },
-    { code: 'war', name: 'Waray' },
-    { code: 'wo', name: 'Wolof' },
-    { code: 'xal', name: 'Kalmyk' },
-    { code: 'yap', name: 'Yapese' },
-    { code: 'zap', name: 'Zapotec' },
-    { code: 'zen', name: 'Zenaga' },
-    { code: 'zha', name: 'Zhuang' },
-    { code: 'zun', name: 'Zuni' },
-    { code: 'zza', name: 'Zazaki' }
+    { code: 'az', name: 'Azerbaijani' },
+    { code: 'bn', name: 'Bengali' },
+    { code: 'gu', name: 'Gujarati' },
+    { code: 'kn', name: 'Kannada' },
+    { code: 'ml', name: 'Malayalam' },
+    { code: 'mr', name: 'Marathi' },
+    { code: 'ne', name: 'Nepali' },
+    { code: 'pa', name: 'Punjabi' },
+    { code: 'si', name: 'Sinhala' },
+    { code: 'ta', name: 'Tamil' },
+    { code: 'te', name: 'Telugu' },
+    { code: 'ur', name: 'Urdu' },
   ]
   
   return (
@@ -1005,8 +857,10 @@ function App() {
             >
               <div className="recording-area">
                 {isRecording ? (
-                  <div className="recording-active" onClick={stopRecording} style={{ cursor: 'pointer' }}>
-                    <div className="recording-timer">{formatTime(recordingTime)}</div>
+                  <div className="recording-active">
+                    <div className="recording-timer" style={{ opacity: isPaused ? 0.5 : 1 }}>
+                      {formatTime(recordingTime)} {isPaused && '(Paused)'}
+                    </div>
                     <div className="audio-visualizer-container">
                       <div className="audio-visualizer">
                         {audioLevels.map((level, i) => {
@@ -1027,7 +881,8 @@ function App() {
                                   hsl(${hue + mouseInfluence * 30}, 90%, 65%) 0%, 
                                   hsl(${hue + 20 + mouseInfluence * 30}, 80%, 55%) 100%)`,
                                 boxShadow: adjustedLevel > 0.3 ? `0 0 ${8 + adjustedLevel * 15}px hsla(${hue}, 90%, 65%, ${adjustedLevel * 0.6})` : 'none',
-                                opacity: 0.6 + mouseInfluence * 0.4
+                                opacity: 0.6 + mouseInfluence * 0.4,
+                                animation: isPaused ? 'none' : undefined
                               }}
                             />
                           )
@@ -1038,8 +893,28 @@ function App() {
                         left: `${mousePos.x * 100}%`
                       }}></div>
                     </div>
-                    <div className="recording-stop-hint">
-                      <span>Click anywhere to stop</span>
+                    <div className="recording-controls">
+                      {isPaused ? (
+                        <button className="recording-btn resume" onClick={resumeRecording}>
+                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M8 5v14l11-7z"/>
+                          </svg>
+                          Resume
+                        </button>
+                      ) : (
+                        <button className="recording-btn pause" onClick={pauseRecording}>
+                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+                          </svg>
+                          Pause
+                        </button>
+                      )}
+                      <button className="recording-btn stop" onClick={stopRecording}>
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                          <rect x="6" y="6" width="12" height="12" rx="2"/>
+                        </svg>
+                        Stop & Transcribe
+                      </button>
                     </div>
                   </div>
                 ) : (
@@ -1084,24 +959,62 @@ function App() {
             </div>
             
             {/* Audio Player */}
-            {audioUrl && (
+            {recordedAudioUrl && (
               <div className="audio-player-card">
-                <audio controls src={audioUrl} />
-                <button 
-                  onClick={clearAll}
-                  style={{ 
-                    marginTop: '12px', 
-                    background: 'transparent', 
-                    border: '1px solid var(--border-glass)',
-                    color: 'var(--text-muted)',
-                    padding: '8px 16px',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                    fontSize: '0.85rem'
-                  }}
-                >
-                  Clear
-                </button>
+                <div className="audio-player-header">
+                  <span className="audio-player-label">Recorded Audio</span>
+                  <span className="audio-player-duration">{formatTime(recordingTime)}</span>
+                </div>
+                <audio 
+                  controls 
+                  src={recordedAudioUrl} 
+                  style={{ width: '100%', height: '40px' }}
+                />
+                <div className="audio-player-actions">
+                  <button 
+                    onClick={() => {
+                      const a = document.createElement('a')
+                      a.href = recordedAudioUrl
+                      a.download = `recording-${Date.now()}.webm`
+                      a.click()
+                    }}
+                    style={{ 
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      background: 'var(--bg-secondary)', 
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--text-secondary)',
+                      padding: '8px 14px',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                      fontWeight: 600
+                    }}
+                  >
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                      <polyline points="7 10 12 15 17 10"/>
+                      <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                    Download
+                  </button>
+                  <button 
+                    onClick={clearAll}
+                    style={{ 
+                      background: 'transparent', 
+                      border: '1px solid var(--border-color)',
+                      color: 'var(--text-muted)',
+                      padding: '8px 14px',
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      fontSize: '0.8rem',
+                      fontWeight: 600
+                    }}
+                  >
+                    Clear
+                  </button>
+                </div>
               </div>
             )}
             
@@ -1189,28 +1102,37 @@ function App() {
                   
                   {segments.length > 0 && (
                     <div className="segments-list">
-                      {segments.map((segment, index) => (
-                        <div key={index} className="segment-item">
-                          <span className="segment-time">
-                            {segment.start?.toFixed(2) || '0.00'} - {segment.end?.toFixed(2) || '0.00'}
-                          </span>
-                          <span className="segment-text">{segment.text}</span>
-                          <button 
-                            onClick={() => copyToClipboard(segment.text)}
-                            style={{
-                              background: 'transparent',
-                              border: 'none',
-                              color: 'var(--text-muted)',
-                              cursor: 'pointer',
-                              padding: '4px 8px',
-                              fontSize: '0.75rem'
-                            }}
-                            title="Copy segment"
-                          >
-                            📋
-                          </button>
-                        </div>
-                      ))}
+                      {segments.map((segment, index) => {
+                        const prevSeg = index > 0 ? segments[index - 1] : null
+                        const showLang = segment.language && (!prevSeg || prevSeg.language !== segment.language)
+                        return (
+                          <div key={index} className="segment-item">
+                            <div className="segment-header">
+                              <span className="segment-time">
+                                {segment.start?.toFixed(2) || '0.00'} - {segment.end?.toFixed(2) || '0.00'}
+                              </span>
+                              {showLang && segment.languageName && (
+                                <span className="segment-lang">{segment.languageName}</span>
+                              )}
+                            </div>
+                            <span className="segment-text">{segment.text}</span>
+                            <button 
+                              onClick={() => copyToClipboard(segment.text)}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--text-muted)',
+                                cursor: 'pointer',
+                                padding: '4px 8px',
+                                fontSize: '0.75rem'
+                              }}
+                              title="Copy segment"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        )
+                      })}
                     </div>
                   )}
                 </div>
@@ -1366,29 +1288,49 @@ function App() {
                   <p>{isStreaming ? 'Waiting for transcription...' : 'Start streaming to see results here'}</p>
                 </div>
               ) : (
-                streamChunks.map((chunk, index) => (
-                  <div key={index} className="stream-chunk" style={{
-                    animation: 'slideIn 0.3s ease-out'
-                  }}>
-                    <div className="chunk-header">
-                      <span className="chunk-time">{chunk.timestamp}</span>
-                      <button 
-                        onClick={() => copyToClipboard(chunk.text)}
-                        style={{
-                          background: 'transparent',
-                          border: 'none',
-                          color: 'var(--text-muted)',
-                          cursor: 'pointer',
-                          padding: '2px 6px',
-                          fontSize: '0.75rem'
-                        }}
-                      >
-                        📋
-                      </button>
+                streamChunks.map((chunk, index) => {
+                  // Show language badge only when it changes from previous chunk
+                  const prevChunk = index > 0 ? streamChunks[index - 1] : null
+                  const showLangBadge = chunk.language && (!prevChunk || prevChunk.language !== chunk.language)
+                  
+                  return (
+                    <div key={index} className="stream-chunk" style={{
+                      animation: 'slideIn 0.3s ease-out'
+                    }}>
+                      <div className="chunk-header">
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <span className="chunk-time">{chunk.timestamp}</span>
+                          {showLangBadge && chunk.languageName && (
+                            <span style={{
+                              fontSize: '0.65rem',
+                              padding: '2px 6px',
+                              background: 'var(--eburon-primary)',
+                              color: 'white',
+                              borderRadius: '4px',
+                              fontWeight: 600
+                            }}>
+                              {chunk.languageName}
+                            </span>
+                          )}
+                        </div>
+                        <button 
+                          onClick={() => copyToClipboard(chunk.text)}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--text-muted)',
+                            cursor: 'pointer',
+                            padding: '2px 6px',
+                            fontSize: '0.75rem'
+                          }}
+                        >
+                          📋
+                        </button>
+                      </div>
+                      <p className="chunk-text">{chunk.text}</p>
                     </div>
-                    <p className="chunk-text">{chunk.text}</p>
-                  </div>
-                ))
+                  )
+                })
               )}
             </div>
             
