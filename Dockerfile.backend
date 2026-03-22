@@ -1,52 +1,46 @@
-# Backend Dockerfile
+# Backend Dockerfile - Optimized for auto-start
 FROM python:3.11-slim
 
-# Install system dependencies for whisper.cpp
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    cmake \
-    git \
-    curl \
-    wget \
-    libopenblas-dev \
-    ffmpeg \
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git curl wget libopenblas-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Clone and build whisper.cpp
-RUN git clone https://github.com/ggerganov/whisper.cpp.git /whisper.cpp && \
+# Build whisper.cpp
+RUN git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git /whisper.cpp && \
     cd /whisper.cpp && \
-    cmake -B build && \
+    cmake -B build -DGGML_BLAS=ON && \
     cmake --build build --config Release -j$(nproc) && \
     cp build/bin/whisper-cli /usr/local/bin/ && \
     cp build/bin/whisper-stream /usr/local/bin/ && \
-    cp build/bin/whisper-server /usr/local/bin/
+    rm -rf /whisper.cpp
 
-# Copy requirements and install Python dependencies
+# Install Python deps
 COPY api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy app
 COPY api/ /app/api/
 COPY data/ /app/data/
 
-# Create directories for models and uploads
-RUN mkdir -p /app/models /app/uploads
+# Create directories and download models
+RUN mkdir -p /app/models /app/uploads && \
+    wget -q -O /app/models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin && \
+    wget -q -O /app/models/ggml-tiny.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin
 
-# Download default model
-RUN wget -O /app/models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
-
-# Environment variables
+# Environment
 ENV MODEL_DIR=/app/models
 ENV UPLOAD_DIR=/app/uploads
 ENV WHISPER_CLI=/usr/local/bin/whisper-cli
 ENV WHISPER_STREAM=/usr/local/bin/whisper-stream
 ENV FFMPEG=/usr/bin/ffmpeg
+ENV PYTHONUNBUFFERED=1
 
-# Expose port
 EXPOSE 3002
 
-# Run the application
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+    CMD curl -f http://localhost:3002/api/health || exit 1
+
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "3002"]
