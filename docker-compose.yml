@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # FastAPI Backend with whisper.cpp
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: eburon-backend
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./uploads:/app/uploads
+    environment:
+      - MODEL_DIR=/app/models
+      - UPLOAD_DIR=/app/uploads
+      - DEFAULT_MODEL=ggml-base.en.bin
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Frontend (Nginx)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: eburon-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Optional: PostgreSQL for production
+  # postgres:
+  #   image: postgres:16-alpine
+  #   environment:
+  #     POSTGRES_DB: eburon
+  #     POSTGRES_USER: eburon
+  #     POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   ports:
+  #     - "5432:5432"
+
+volumes:
+  # postgres_data:
+  models:
+  uploads:

@@ -1,0 +1,52 @@
+# Backend Dockerfile
+FROM python:3.11-slim
+
+# Install system dependencies for whisper.cpp
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    git \
+    curl \
+    wget \
+    libopenblas-dev \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /app
+
+# Clone and build whisper.cpp
+RUN git clone https://github.com/ggerganov/whisper.cpp.git /whisper.cpp && \
+    cd /whisper.cpp && \
+    cmake -B build && \
+    cmake --build build --config Release -j$(nproc) && \
+    cp build/bin/whisper-cli /usr/local/bin/ && \
+    cp build/bin/whisper-stream /usr/local/bin/ && \
+    cp build/bin/whisper-server /usr/local/bin/
+
+# Copy requirements and install Python dependencies
+COPY api/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY api/ /app/api/
+COPY data/ /app/data/
+
+# Create directories for models and uploads
+RUN mkdir -p /app/models /app/uploads
+
+# Download default model
+RUN wget -O /app/models/ggml-base.en.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin
+
+# Environment variables
+ENV MODEL_DIR=/app/models
+ENV UPLOAD_DIR=/app/uploads
+ENV WHISPER_CLI=/usr/local/bin/whisper-cli
+ENV WHISPER_STREAM=/usr/local/bin/whisper-stream
+ENV FFMPEG=/usr/bin/ffmpeg
+
+# Expose port
+EXPOSE 3002
+
+# Run the application
+CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "3002"]
